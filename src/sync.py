@@ -68,6 +68,16 @@ class StepFailed(RuntimeError):
     """Raised by a step to halt the run. The step name is used for --resume-from."""
 
 
+def _wait_settled(page, timeout: int = 10000) -> None:
+    """Best-effort settle wait. Some pages (e.g. MicroMart's dashboard, with a live-updating
+    chart and chat widget) never truly reach networkidle -- don't treat that as fatal. By the
+    time this times out, the page is almost always already fully interactive."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout)
+    except PlaywrightTimeoutError:
+        pass
+
+
 def get_keychain_secret(service: str, setup_hint: str = "config/keychain-setup.md") -> str:
     result = subprocess.run(
         ["security", "find-generic-password", "-a", os.environ["USER"], "-s", service, "-w"],
@@ -220,7 +230,7 @@ def _login_if_needed(
 ) -> None:
     for attempt in range(1, MAX_LOGIN_ATTEMPTS + 1):
         page.goto(dashboard_url)
-        page.wait_for_load_state("networkidle")
+        _wait_settled(page)
         if login_url_fragment not in page.url:
             log.info("%s: already logged in (session reused)", site_label)
             return
@@ -234,7 +244,7 @@ def _login_if_needed(
             page.screenshot(path=str(DEBUG_DIR / f"{site_label.lower()}-fill-timeout-attempt{attempt}.png"))
             raise
         page.get_by_role("button", name=re.compile(submit_name, re.I)).click()
-        page.wait_for_load_state("networkidle")
+        _wait_settled(page)
 
         if login_url_fragment not in page.url:
             log.info("%s: login succeeded", site_label)
@@ -255,7 +265,7 @@ def _login_if_needed(
             if secret_result.returncode == 0:
                 secret = secret_result.stdout.strip()
             if secret and _submit_totp_code(page, secret, log, site_label):
-                page.wait_for_load_state("networkidle")
+                _wait_settled(page)
                 if login_url_fragment not in page.url:
                     log.info("%s: login succeeded (TOTP auto-submitted)", site_label)
                     return
@@ -336,7 +346,7 @@ def step_micromart_filter_and_download(ctx: Context) -> None:
     log = ctx.log
 
     page.goto(MICROMART_TRANSACTIONS)
-    page.wait_for_load_state("networkidle")
+    _wait_settled(page)
     _dismiss_hubspot_popup(page, log)
 
     # Field accepts typed numeric input (auto-formats month/day) per live confirmation.
@@ -345,7 +355,7 @@ def step_micromart_filter_and_download(ctx: Context) -> None:
     date_field.type(ctx.target_date.strftime("%m%d%Y"), delay=80)
 
     page.get_by_role("button", name=re.compile("^Apply$", re.I)).click()
-    page.wait_for_load_state("networkidle")
+    _wait_settled(page)
 
     # Opens the Download CSV dropdown (trigger button, before the menu exists).
     page.get_by_role("button", name=re.compile("Download CSV", re.I)).first.click()
@@ -419,13 +429,13 @@ def step_vendsoft_import(ctx: Context) -> None:
     # live) -- the SPA's router apparently expects client-side navigation state that a
     # fresh page load doesn't have. Click through the sidebar instead, same as a human would.
     page.goto(VENDSOFT_BASE)
-    page.wait_for_load_state("networkidle")
+    _wait_settled(page)
     page.get_by_text(re.compile("^Configuration$", re.I)).click()
-    page.wait_for_load_state("networkidle")
+    _wait_settled(page)
     page.get_by_text(re.compile("^TELEMETRY$", re.I)).click()
-    page.wait_for_load_state("networkidle")
+    _wait_settled(page)
     page.get_by_text(re.compile("^Sales import$", re.I)).click()
-    page.wait_for_load_state("networkidle")
+    _wait_settled(page)
 
     DEBUG_DIR.mkdir(exist_ok=True)
     page.screenshot(path=str(DEBUG_DIR / "vendsoft-sales-import-before-browse.png"))
@@ -440,7 +450,7 @@ def step_vendsoft_import(ctx: Context) -> None:
 
     log.info("Attached %s in VendSoft sales import", csv_path.name)
 
-    page.wait_for_load_state("networkidle")
+    _wait_settled(page)
     page.wait_for_timeout(3000)
     page.mouse.wheel(0, 400)
     page.wait_for_timeout(500)
@@ -472,15 +482,45 @@ def step_vendsoft_import(ctx: Context) -> None:
         page_text = page.locator("body").inner_text()
     except Exception as e:
         page_text = f"(could not capture page text: {e})"
-    log.error("VendSoft did not show the known 'already imported' outcome after attaching. "
-              "This likely means a machine/product mapping screen or an import-confirmation "
-              "step appeared that isn't automated yet (see VendSoft's own import docs -- "
-              "steps 3 and 4). Page text at this point: %s", page_text.replace("\n", " | "))
+
+    # Second known-good path: VendSoft's mapping-review screen (docs steps 3-4), but only
+    # when everything already auto-resolved -- 0 machines/products left to review. If
+    # anything is actually unresolved, this is exactly the manual-mapping scenario flagged
+    # as a future gap -- stop safely and ask for a screenshot rather than guess at a UI
+    # that requires picking from a list we've never seen.
+    machines_review = re.search(r"Machines to review\D*(\d+)", page_text)
+    products_review = re.search(r"Products to review\D*(\d+)", page_text)
+    import_button = page.get_by_role("button", name=re.compile(r"^IMPORT .*TRANSACTIONS$", re.I))
+
+    if (
+        machines_review and products_review
+        and int(machines_review.group(1)) == 0
+        and int(products_review.group(1)) == 0
+        and import_button.count() > 0
+    ):
+        log.info("VendSoft review screen: everything auto-resolved (0 machines, 0 products "
+                 "to review) -- clicking final import confirmation.")
+        import_button.first.click()
+        _wait_settled(page)
+        page.wait_for_timeout(2000)
+        page.screenshot(path=str(DEBUG_DIR / "vendsoft-sales-import-after-confirm.png"))
+        try:
+            post_text = page.locator("body").inner_text()
+        except Exception as e:
+            post_text = f"(could not capture post-import page text: {e})"
+        log.info("VENDSOFT_IMPORT_RESULT: Imported via review screen | %s",
+                  post_text.replace("\n", " | ")[:500])
+        return
+
+    log.error("VendSoft did not show a known-good outcome after attaching (neither 'already "
+              "imported' nor a fully auto-resolved review screen). Machines/products to review "
+              "may be > 0, needing manual selection. Page text at this point: %s",
+              page_text.replace("\n", " | "))
     raise StepFailed(
-        "VendSoft is showing an unrecognized screen after attaching the file -- likely a "
-        "machine/product mapping step or an import-confirmation button that isn't automated "
-        "yet. Please open VendSoft, complete Sales Import -> mapping -> Import manually for "
-        "this file, and send a screenshot of what appeared so this can be automated."
+        "VendSoft is showing machines or products that need manual mapping (or an "
+        "unrecognized screen) after attaching the file. Please open VendSoft, complete "
+        "Sales Import -> mapping -> Import manually for this file, and send a screenshot "
+        "of what appeared so this can be automated."
     )
 
 
