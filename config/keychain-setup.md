@@ -24,12 +24,20 @@ printf "VendSoft username/email: " && read -rs PW && echo && security add-generi
 
 ## MFA (TOTP secret)
 
-MicroMart's `automatons@accessamenities.com` account requires MFA. Using an authenticator
+MicroMart's `automations@accessamenities.com` account requires MFA. Using an authenticator
 app (not SMS) means the script can compute valid codes itself — see the main README for how
 to get the raw secret key during setup. Store it the same way:
 
 ```bash
 printf "MicroMart TOTP secret: " && read -rs PW && echo && security add-generic-password -a "$USER" -s "micromart-platform-totp-secret" -w "$PW" -U && unset PW
+```
+
+If MicroMart ever forces an MFA reset (e.g. after using a recovery code), update the stored
+secret the same way — the `-U` flag overwrites it in place. To get a code to finish that setup,
+or any time you need one manually:
+
+```bash
+cd /Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync && .venv/bin/python src/totp_code.py
 ```
 
 MicroMart also issues a one-time **recovery code** when MFA is enabled -- a human-only fallback
