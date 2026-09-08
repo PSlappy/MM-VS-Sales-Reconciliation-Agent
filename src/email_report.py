@@ -95,15 +95,73 @@ def _wrap(accent_color: str, title: str, body_html: str) -> str:
 </div>"""
 
 
-def render_success_html(date_str: str, vendsoft_result: str, csv_filename: str) -> str:
+_OUTCOME_LABELS = {
+    "already_imported": "Already imported (exact duplicate)",
+    "imported": "Imported",
+}
+
+
+def _stat_row(label: str, value) -> str:
+    display = "—" if value is None else html.escape(str(value))
+    return (f'<tr><td style="padding:6px 0;color:#6b7280;width:180px;vertical-align:top;">'
+            f'{html.escape(label)}</td><td style="padding:6px 0;">{display}</td></tr>')
+
+
+def render_success_html(date_str: str, csv_filename: str, csv_row_count, stats: dict) -> str:
+    outcome = stats.get("outcome")
+    vendsoft_rows = stats.get("rows")
+
+    if csv_row_count is not None and vendsoft_rows is not None:
+        if csv_row_count == vendsoft_rows:
+            reconciliation = (f'<span style="color:#16a34a;">&#10003; Match</span> '
+                               f'&mdash; {csv_row_count} rows in the downloaded CSV, '
+                               f'VendSoft parsed the same {vendsoft_rows}.')
+        else:
+            reconciliation = (f'<span style="color:#dc2626;font-weight:bold;">&#9888; Mismatch</span> '
+                               f'&mdash; downloaded CSV had {csv_row_count} rows, but VendSoft '
+                               f'reported parsing {vendsoft_rows}. Worth a look.')
+    else:
+        reconciliation = "— (row counts unavailable for comparison)"
+
+    txns = stats.get("txns")
+    materialized = stats.get("imported")
+    materialized_check = None
+    if outcome == "imported" and txns is not None and materialized is not None:
+        if txns == materialized:
+            materialized_check = (f'<span style="color:#16a34a;">&#10003; Match</span> '
+                                   f'&mdash; all {txns} transactions in the file were materialized in VendSoft.')
+        else:
+            materialized_check = (f'<span style="color:#dc2626;font-weight:bold;">&#9888; Mismatch</span> '
+                                   f'&mdash; file had {txns} transactions, but only {materialized} were '
+                                   f'materialized in VendSoft. Worth a look.')
+
+    rows = [_stat_row("File", csv_filename)]
+    rows.append(_stat_row("Outcome", _OUTCOME_LABELS.get(outcome, outcome or "unknown")))
+    rows.append(_stat_row("Rows (VendSoft parsed)", vendsoft_rows))
+    rows.append(_stat_row("Transactions", txns))
+    rows.append(_stat_row("Products", stats.get("products")))
+    rows.append(_stat_row("Machines matched", stats.get("machines_matched")))
+    if outcome == "already_imported":
+        rows.append(_stat_row("Exact duplicates", stats.get("duplicates")))
+    elif outcome == "imported":
+        rows.append(_stat_row("Transactions materialized", materialized))
+
+    checks_html = f"""\
+    <p style="background:#f9fafb;border-radius:6px;padding:10px 12px;font-size:13px;">
+      <strong>CSV vs VendSoft row count:</strong><br>{reconciliation}
+    </p>"""
+    if materialized_check:
+        checks_html += f"""\
+    <p style="background:#f9fafb;border-radius:6px;padding:10px 12px;font-size:13px;margin-top:8px;">
+      <strong>Transactions vs materialized:</strong><br>{materialized_check}
+    </p>"""
+
     body = f"""\
     <p>The daily MicroMart &rarr; VendSoft sync completed successfully for <strong>{html.escape(date_str)}</strong>.</p>
     <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-      <tr><td style="padding:6px 0;color:#6b7280;width:140px;vertical-align:top;">File</td>
-          <td style="padding:6px 0;">{html.escape(csv_filename)}</td></tr>
-      <tr><td style="padding:6px 0;color:#6b7280;vertical-align:top;">VendSoft result</td>
-          <td style="padding:6px 0;">{html.escape(vendsoft_result)}</td></tr>
+      {"".join(rows)}
     </table>
+    {checks_html}
     <p style="color:#6b7280;font-size:13px;">No action needed.</p>
     """
     return _wrap("#16a34a", f"Sync succeeded — {date_str}", body)

@@ -12,16 +12,19 @@ and emailing a report. This script's job is just to do the work and report
 its own status clearly via logs + exit code.
 """
 import argparse
+import json
 import logging
 import os
 import re
 import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
 from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,6 +69,43 @@ HEADLESS = os.environ.get("SYNC_HEADLESS") == "1"
 
 class StepFailed(RuntimeError):
     """Raised by a step to halt the run. The step name is used for --resume-from."""
+
+
+def _goto(page, url: str, retries: int = 3, delay_seconds: float = 5) -> None:
+    """page.goto with a few retries for transient network blips (e.g. right after the Mac
+    wakes from sleep and Wi-Fi is still reconnecting -- exactly when a launchd catch-up run
+    is likely to fire)."""
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            page.goto(url)
+            return
+        except PlaywrightError as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(delay_seconds)
+    raise last_error
+
+
+def _extract_vendsoft_stats(page_text: str, outcome: str) -> dict:
+    """Best-effort structured numbers out of VendSoft's import/review screen text, for a
+    clean email table instead of a raw text dump."""
+    def _num(pattern):
+        m = re.search(pattern, page_text, re.I)
+        return int(m.group(1)) if m else None
+
+    header = re.search(r"(\d+)\s*rows?\s*[·\-]\s*(\d+)\s*txns?\s*[·\-]\s*(\d+)\s*products?",
+                        page_text, re.I)
+    return {
+        "outcome": outcome,
+        "rows": int(header.group(1)) if header else None,
+        "txns": int(header.group(2)) if header else None,
+        "products": int(header.group(3)) if header else None,
+        "machines_matched": _num(r"(\d+)\s*machines?\s*matched"),
+        "duplicates": _num(r"(\d+)\s*exact duplicates"),
+        # "Ready transactions" appears pre-confirmation, "Transactions materialized" after.
+        "imported": _num(r"(?:Ready transactions|Transactions materialized)\D*(\d+)"),
+    }
 
 
 def _wait_settled(page, timeout: int = 10000) -> None:
@@ -229,7 +269,7 @@ def _login_if_needed(
     totp_keychain_service: Optional[str] = None,
 ) -> None:
     for attempt in range(1, MAX_LOGIN_ATTEMPTS + 1):
-        page.goto(dashboard_url)
+        _goto(page, dashboard_url)
         _wait_settled(page)
         if login_url_fragment not in page.url:
             log.info("%s: already logged in (session reused)", site_label)
@@ -345,7 +385,7 @@ def step_micromart_filter_and_download(ctx: Context) -> None:
     page = ctx.micromart_page()
     log = ctx.log
 
-    page.goto(MICROMART_TRANSACTIONS)
+    _goto(page, MICROMART_TRANSACTIONS)
     _wait_settled(page)
     _dismiss_hubspot_popup(page, log)
 
@@ -372,6 +412,14 @@ def step_micromart_filter_and_download(ctx: Context) -> None:
     download = download_info.value
     download.save_as(str(dest))
     log.info("Saved itemized sales CSV to %s", dest)
+
+    try:
+        import csv as csv_module
+        with open(dest, newline="", encoding="utf-8") as f:
+            row_count = sum(1 for _ in csv_module.reader(f)) - 1  # exclude header
+        log.info("CSV_ROW_COUNT: %d", row_count)
+    except Exception as e:
+        log.warning("Could not count CSV rows for reconciliation: %s", e)
 
 
 def step_upload_to_drive(ctx: Context) -> None:
@@ -428,7 +476,7 @@ def step_vendsoft_import(ctx: Context) -> None:
     # Deep-linking straight to the import URL renders blank for this account (confirmed
     # live) -- the SPA's router apparently expects client-side navigation state that a
     # fresh page load doesn't have. Click through the sidebar instead, same as a human would.
-    page.goto(VENDSOFT_BASE)
+    _goto(page, VENDSOFT_BASE)
     _wait_settled(page)
     page.get_by_text(re.compile("^Configuration$", re.I)).click()
     _wait_settled(page)
@@ -458,30 +506,19 @@ def step_vendsoft_import(ctx: Context) -> None:
 
     # VendSoft's own docs describe two more required steps we haven't automated yet:
     # confirming machine/product mapping, then an explicit click to finalize the import.
-    # We've only ever seen the "already imported" (exact duplicate) outcome, which
-    # apparently short-circuits straight past both. Anything else is unknown territory --
-    # fail safely and surface it, rather than silently reporting success on an import
-    # that may not have actually completed (e.g. stuck on an unmapped machine/product
-    # screen we've never seen and can't yet click through).
-    already_imported = page.get_by_text(re.compile("already imported", re.I))
-    if already_imported.count() > 0:
-        marker = already_imported.first
-        result_text = None
-        for levels_up in range(1, 7):
-            candidate = marker.locator("xpath=" + "/".join([".."] * levels_up))
-            text = candidate.inner_text()
-            if len(text) > 80:
-                result_text = text
-                break
-        if result_text is None:
-            result_text = marker.inner_text()
-        log.info("VENDSOFT_IMPORT_RESULT: %s", result_text.replace("\n", " | "))
-        return
-
+    # Anything other than the two known-good outcomes below is unknown territory -- fail
+    # safely and surface it, rather than silently reporting success on an import that may
+    # not have actually completed (e.g. stuck on an unmapped machine/product screen we've
+    # never seen and can't yet click through).
     try:
         page_text = page.locator("body").inner_text()
     except Exception as e:
         page_text = f"(could not capture page text: {e})"
+
+    if re.search("already imported", page_text, re.I):
+        stats = _extract_vendsoft_stats(page_text, outcome="already_imported")
+        log.info("VENDSOFT_IMPORT_STATS: %s", json.dumps(stats))
+        return
 
     # Second known-good path: VendSoft's mapping-review screen (docs steps 3-4), but only
     # when everything already auto-resolved -- 0 machines/products left to review. If
@@ -508,8 +545,8 @@ def step_vendsoft_import(ctx: Context) -> None:
             post_text = page.locator("body").inner_text()
         except Exception as e:
             post_text = f"(could not capture post-import page text: {e})"
-        log.info("VENDSOFT_IMPORT_RESULT: Imported via review screen | %s",
-                  post_text.replace("\n", " | ")[:500])
+        stats = _extract_vendsoft_stats(post_text, outcome="imported")
+        log.info("VENDSOFT_IMPORT_STATS: %s", json.dumps(stats))
         return
 
     log.error("VendSoft did not show a known-good outcome after attaching (neither 'already "

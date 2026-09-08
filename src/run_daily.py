@@ -5,6 +5,7 @@ then emails a success or failure report. This is what the launchd job calls.
 
 Manual equivalent of running sync.py directly, but with reporting on top.
 """
+import json
 import re
 import sys
 from datetime import date, timedelta
@@ -66,8 +67,12 @@ def main() -> None:
     log_text = log_file.read_text() if log_file.exists() else ""
 
     if exit_code == 0 and crash_message is None:
-        vendsoft_result = _last_match(r"VENDSOFT_IMPORT_RESULT: (.+)", log_text) or "(no result captured)"
-        html = email_report.render_success_html(date_str, vendsoft_result, csv_filename)
+        stats_raw = _last_match(r"VENDSOFT_IMPORT_STATS: (.+)", log_text)
+        stats = json.loads(stats_raw) if stats_raw else {"outcome": None}
+        csv_row_count_raw = _last_match(r"CSV_ROW_COUNT: (\d+)", log_text)
+        csv_row_count = int(csv_row_count_raw) if csv_row_count_raw else None
+
+        html = email_report.render_success_html(date_str, csv_filename, csv_row_count, stats)
         email_report.send_email(f"MicroMart sync succeeded - {date_str}", html)
     else:
         failed_step = _last_match(r"=== step: (\S+) ===", log_text) or "(unknown)"
