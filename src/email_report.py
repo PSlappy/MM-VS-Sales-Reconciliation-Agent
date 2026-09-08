@@ -14,9 +14,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OAUTH_CLIENT_FILE = ROOT / "config" / "oauth-client.json"
 RECIPIENTS_FILE = ROOT / "config" / "notify-recipients.txt"
+ASSETS_DIR = ROOT / "assets"
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 KEYCHAIN_SERVICE = "vendsoft-drive-oauth-refresh-token"
 SENDER = "info@accessamenities.com"
+
+# Always embedded (by fixed Content-ID) in every email, success or failure.
+LOGO_FILES = {
+    "aa-logo": ASSETS_DIR / "access-amenities-logo-navy.png",
+    "micromart-logo": ASSETS_DIR / "Micromart_Logo_Black.png",
+    "vendsoft-logo": ASSETS_DIR / "vendsoft-logo.png",
+}
 
 
 def get_recipients() -> list:
@@ -56,19 +64,24 @@ def _gmail_service():
 def send_email(subject: str, html_body: str, image_paths: list = None) -> None:
     to_list = get_recipients()
 
-    if image_paths:
-        message = MIMEMultipart("related")
-        message.attach(MIMEText(html_body, "html"))
-        for i, path in enumerate(image_paths):
-            path = Path(path)
-            if not path.exists():
-                continue
+    message = MIMEMultipart("related")
+    message.attach(MIMEText(html_body, "html"))
+
+    for cid, path in LOGO_FILES.items():
+        if path.exists():
             img = MIMEImage(path.read_bytes())
-            img.add_header("Content-ID", f"<shot{i}>")
+            img.add_header("Content-ID", f"<{cid}>")
             img.add_header("Content-Disposition", "inline", filename=path.name)
             message.attach(img)
-    else:
-        message = MIMEText(html_body, "html")
+
+    for i, path in enumerate(image_paths or []):
+        path = Path(path)
+        if not path.exists():
+            continue
+        img = MIMEImage(path.read_bytes())
+        img.add_header("Content-ID", f"<shot{i}>")
+        img.add_header("Content-Disposition", "inline", filename=path.name)
+        message.attach(img)
 
     message["to"] = ", ".join(to_list)
     message["from"] = SENDER
@@ -82,15 +95,29 @@ def _wrap(accent_color: str, title: str, body_html: str) -> str:
     return f"""\
 <div style="font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;background:#f4f5f7;padding:24px;">
   <div style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-bottom:1px solid #f0f0f0;">
+      <tr><td style="padding:18px 24px;">
+        <img src="cid:aa-logo" alt="Access Amenities" height="26" style="height:26px;display:block;">
+      </td></tr>
+    </table>
     <div style="background:{accent_color};padding:16px 24px;">
       <h1 style="margin:0;color:#ffffff;font-size:18px;">{html.escape(title)}</h1>
     </div>
     <div style="padding:24px;color:#1f2937;font-size:14px;line-height:1.6;">
       {body_html}
     </div>
-    <div style="padding:16px 24px;background:#f9fafb;color:#9ca3af;font-size:12px;">
-      MicroMart &rarr; VendSoft daily sync &middot; Access Amenities
-    </div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;">
+      <tr>
+        <td style="padding:16px 24px;vertical-align:middle;">
+          <img src="cid:micromart-logo" alt="MicroMart" height="14" style="height:14px;vertical-align:middle;">
+          <span style="color:#9ca3af;font-size:12px;vertical-align:middle;padding:0 8px;">&rarr;</span>
+          <img src="cid:vendsoft-logo" alt="VendSoft" height="16" style="height:16px;vertical-align:middle;">
+        </td>
+        <td style="padding:16px 24px;text-align:right;vertical-align:middle;color:#9ca3af;font-size:11px;">
+          Daily sync
+        </td>
+      </tr>
+    </table>
   </div>
 </div>"""
 
