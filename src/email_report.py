@@ -123,17 +123,25 @@ def render_success_html(date_str: str, csv_filename: str, csv_row_count, stats: 
     else:
         reconciliation = "— (row counts unavailable for comparison)"
 
+    # This is a rolling 30-day export, so most transactions in any given file are expected
+    # to already be imported from previous days -- materialized < txns is the normal case,
+    # not a problem. This line is purely informational, not a pass/fail check like the row
+    # count reconciliation above (which is about parsing integrity, not date overlap).
     txns = stats.get("txns")
     materialized = stats.get("imported")
     materialized_check = None
     if outcome == "imported" and txns is not None and materialized is not None:
-        if txns == materialized:
-            materialized_check = (f'<span style="color:#16a34a;">&#10003; Match</span> '
-                                   f'&mdash; all {txns} transactions in the file were materialized in VendSoft.')
+        already_seen = txns - materialized
+        if already_seen == 0:
+            materialized_check = f"All {txns} transactions in this file were newly materialized."
+        elif already_seen > 0:
+            materialized_check = (f"{materialized} of {txns} transactions in this file were newly "
+                                   f"materialized ({already_seen} were already-imported duplicates "
+                                   f"from previous days &mdash; expected for a rolling 30-day pull).")
         else:
-            materialized_check = (f'<span style="color:#dc2626;font-weight:bold;">&#9888; Mismatch</span> '
-                                   f'&mdash; file had {txns} transactions, but only {materialized} were '
-                                   f'materialized in VendSoft. Worth a look.')
+            materialized_check = (f'<span style="color:#dc2626;font-weight:bold;">&#9888; Unexpected</span> '
+                                   f'&mdash; {materialized} materialized is more than the {txns} '
+                                   f'transactions in the file. Worth a look.')
 
     rows = [_stat_row("File", csv_filename)]
     rows.append(_stat_row("Outcome", _OUTCOME_LABELS.get(outcome, outcome or "unknown")))
@@ -153,7 +161,7 @@ def render_success_html(date_str: str, csv_filename: str, csv_row_count, stats: 
     if materialized_check:
         checks_html += f"""\
     <p style="background:#f9fafb;border-radius:6px;padding:10px 12px;font-size:13px;margin-top:8px;">
-      <strong>Transactions vs materialized:</strong><br>{materialized_check}
+      <strong>New vs. already-imported:</strong><br>{materialized_check}
     </p>"""
 
     body = f"""\

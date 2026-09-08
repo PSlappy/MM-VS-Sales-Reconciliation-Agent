@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Entry point for the scheduled daily run: executes the sync for "yesterday",
-then emails a success or failure report. This is what the launchd job calls.
+Entry point for the scheduled daily run: executes the rolling 30-day sync, then emails a
+success or failure report. This is what the launchd job calls.
 
 Manual equivalent of running sync.py directly, but with reporting on top.
 """
 import json
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -52,9 +52,9 @@ def _important_log_lines(log_text: str, max_lines: int = 50) -> str:
 
 
 def main() -> None:
-    target_date = date.today() - timedelta(days=1)
+    target_date = date.today()
     date_str = target_date.strftime("%m-%d-%Y")
-    csv_filename = f"transaction-items-{date_str}.csv"
+    csv_filename = f"transaction-items-last30days-{date_str}.csv"
 
     crash_message = None
     try:

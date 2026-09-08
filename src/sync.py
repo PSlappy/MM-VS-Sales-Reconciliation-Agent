@@ -2,8 +2,14 @@
 """
 Daily MicroMart -> Google Drive -> VendSoft sales sync.
 
-Manual run:      python src/sync.py
-Specific date:    python src/sync.py --date 09-05-2026
+Pulls a rolling "Last 30 Days" itemized export every run (not a single day) -- MicroMart
+excludes failed-payment rows from a day's export entirely, and a retried payment that later
+succeeds keeps its *original* transaction date. A 30-day window plus VendSoft's own
+per-transaction duplicate detection means a newly-resolved retry gets picked up within a day
+of becoming successful, instead of being permanently missed by a single-day pull.
+
+Manual run:       python src/sync.py
+Relabel output:   python src/sync.py --date 09-05-2026  (label date for filenames, not a filter)
 Resume a step:    python src/sync.py --resume-from vendsoft_import
 
 Steps are deterministic (Playwright), not agent-driven -- a wrapping scheduled
@@ -160,27 +166,41 @@ class Context:
     def date_dashed(self) -> str:
         return self.target_date.strftime("%m-%d-%Y")
 
+    @property
+    def csv_filename(self) -> str:
+        return f"transaction-items-last30days-{self.date_dashed}.csv"
+
     def _pw(self):
         if self._playwright is None:
             self._playwright = sync_playwright().start()
         return self._playwright
 
-    def _persistent_page(self, attr: str, profile_name: str):
+    def _persistent_page(self, attr: str, profile_name: str, force_headed: bool = False):
         existing = getattr(self, attr)
+        if force_headed and existing is not None:
+            # Escalating an already-open (headless) context to headed -- close it and
+            # relaunch against the same profile dir, so the session/cookies carry over.
+            try:
+                existing.close()
+            except Exception:
+                pass
+            existing = None
+            setattr(self, attr, None)
         if existing is None:
             profile_dir = BROWSER_STATE_DIR / profile_name
             profile_dir.mkdir(parents=True, exist_ok=True)
+            headless = False if force_headed else HEADLESS
             existing = self._pw().chromium.launch_persistent_context(
-                str(profile_dir), headless=HEADLESS
+                str(profile_dir), headless=headless
             )
             setattr(self, attr, existing)
         return existing.pages[0] if existing.pages else existing.new_page()
 
-    def micromart_page(self):
-        return self._persistent_page("_micromart_ctx", "micromart-profile")
+    def micromart_page(self, force_headed: bool = False):
+        return self._persistent_page("_micromart_ctx", "micromart-profile", force_headed)
 
-    def vendsoft_page(self):
-        return self._persistent_page("_vendsoft_ctx", "vendsoft-profile")
+    def vendsoft_page(self, force_headed: bool = False):
+        return self._persistent_page("_vendsoft_ctx", "vendsoft-profile", force_headed)
 
     def screenshot_all(self, tag: str) -> list:
         """Screenshot whichever browser page(s) are currently open, for failure diagnostics."""
@@ -238,7 +258,14 @@ def _submit_totp_code(page, secret: str, log: logging.Logger, site_label: str) -
     DEBUG_DIR.mkdir(exist_ok=True)
     page.screenshot(path=str(DEBUG_DIR / f"{site_label.lower()}-totp-01-field-found.png"))
 
-    code = pyotp.TOTP(secret).now()
+    # Avoid submitting a code that's about to roll over -- network latency between filling
+    # and the server validating it could otherwise turn a valid code into a rejected one,
+    # and repeated rejections are exactly the kind of thing that gets an account locked.
+    totp = pyotp.TOTP(secret)
+    remaining = totp.interval - (time.time() % totp.interval)
+    if remaining < 5:
+        time.sleep(remaining + 0.5)
+    code = totp.now()
     code_input.fill(code)
     page.screenshot(path=str(DEBUG_DIR / f"{site_label.lower()}-totp-02-filled.png"))
 
@@ -258,28 +285,36 @@ def _submit_totp_code(page, secret: str, log: logging.Logger, site_label: str) -
 
 
 def _login_if_needed(
-    page,
     log: logging.Logger,
     *,
+    page_getter: Callable[[bool], object],
     dashboard_url: str,
     login_url_fragment: str,
     site_label: str,
-    fill_fn: Callable[[], None],
+    fill_fn: Callable[[object], None],
     submit_name: str,
     totp_keychain_service: Optional[str] = None,
 ) -> None:
+    """page_getter(force_headed) returns the page to use -- called fresh each attempt so
+    a headless failure can escalate to a headed browser for the retry (observed live:
+    MicroMart blocks headless Chromium logins specifically; headed succeeds with the same
+    credentials/TOTP). fill_fn takes the current page, since it may change across attempts."""
+    forced_headed = False
     for attempt in range(1, MAX_LOGIN_ATTEMPTS + 1):
+        page = page_getter(forced_headed)
         _goto(page, dashboard_url)
         _wait_settled(page)
         if login_url_fragment not in page.url:
             log.info("%s: already logged in (session reused)", site_label)
             return
 
-        log.info("%s: login required (attempt %d/%d)", site_label, attempt, MAX_LOGIN_ATTEMPTS)
+        mode_note = " [headed escalation]" if forced_headed else ""
+        log.info("%s: login required (attempt %d/%d)%s", site_label, attempt, MAX_LOGIN_ATTEMPTS,
+                  mode_note)
         DEBUG_DIR.mkdir(exist_ok=True)
         page.screenshot(path=str(DEBUG_DIR / f"{site_label.lower()}-before-fill-attempt{attempt}.png"))
         try:
-            fill_fn()
+            fill_fn(page)
         except PlaywrightTimeoutError:
             page.screenshot(path=str(DEBUG_DIR / f"{site_label.lower()}-fill-timeout-attempt{attempt}.png"))
             raise
@@ -323,22 +358,27 @@ def _login_if_needed(
             log.info("%s: login succeeded", site_label)
             return
 
+        if HEADLESS and not forced_headed:
+            log.warning("%s: headless login attempt failed -- escalating retry to headed mode",
+                        site_label)
+            forced_headed = True
+
     raise StepFailed(f"{site_label} login failed after {MAX_LOGIN_ATTEMPTS} attempts.")
 
 
 # --- steps -------------------------------------------------------------
 
 def step_micromart_login(ctx: Context) -> None:
-    page = ctx.micromart_page()
     email = get_keychain_secret("micromart-platform-username")
     password = get_keychain_secret("micromart-platform")
 
-    def fill():
+    def fill(page):
         page.get_by_placeholder("name@example.com").fill(email)
         page.get_by_placeholder("Enter your password").fill(password)
 
     _login_if_needed(
-        page, ctx.log,
+        ctx.log,
+        page_getter=ctx.micromart_page,
         dashboard_url=MICROMART_DASHBOARD,
         login_url_fragment=MICROMART_LOGIN_FRAGMENT,
         site_label="MicroMart",
@@ -378,10 +418,14 @@ def _dismiss_hubspot_popup(page, log: logging.Logger) -> None:
 
 
 def step_micromart_filter_and_download(ctx: Context) -> None:
-    # Confirmed behavior: the Download CSV modal's own "Last 30 Days / All" toggle
-    # only appears when no page-level Date filter is applied. Once a specific date
-    # is applied via the left filter panel, the export is scoped to that date and
-    # the toggle disappears -- so no separate date choice is needed in the modal.
+    # Deliberately no date filter: MicroMart excludes failed-payment rows from a day's
+    # export entirely, and a retried payment that later succeeds keeps its *original*
+    # transaction date rather than the retry date. A single-day pull would permanently
+    # miss any transaction that failed and was retried on a later day. Pulling a rolling
+    # 30-day "Last 30 Days" window every day instead means a newly-resolved retry gets
+    # picked up within a day of becoming successful, and VendSoft's own per-transaction
+    # duplicate detection (confirmed live -- it classifies New/Duplicate per row, not per
+    # file) makes re-uploading the overlapping window safe on repeat.
     page = ctx.micromart_page()
     log = ctx.log
 
@@ -389,25 +433,23 @@ def step_micromart_filter_and_download(ctx: Context) -> None:
     _wait_settled(page)
     _dismiss_hubspot_popup(page, log)
 
-    # Field accepts typed numeric input (auto-formats month/day) per live confirmation.
-    date_field = page.get_by_placeholder("MMMM DD, YYYY")
-    date_field.click()
-    date_field.type(ctx.target_date.strftime("%m%d%Y"), delay=80)
-
-    page.get_by_role("button", name=re.compile("^Apply$", re.I)).click()
-    _wait_settled(page)
-
     # Opens the Download CSV dropdown (trigger button, before the menu exists).
     page.get_by_role("button", name=re.compile("Download CSV", re.I)).first.click()
+
+    # "Last 30 Days" is the modal's default when no date filter is applied -- click it
+    # explicitly anyway rather than relying on that default holding.
+    page.get_by_text(re.compile("^Last 30 Days$", re.I)).click()
 
     # Switch Report Type from the default "Transaction Summary" to "Itemized Sales".
     page.get_by_text("Itemized Sales", exact=False).click()
 
     TARGET_DIR.mkdir(parents=True, exist_ok=True)
-    dest = TARGET_DIR / f"transaction-items-{ctx.date_dashed}.csv"
+    dest = TARGET_DIR / ctx.csv_filename
 
-    # Second "Download CSV" button, now inside the open menu.
-    with page.expect_download() as download_info:
+    # Second "Download CSV" button, now inside the open menu. A 30-day export can take a
+    # minute or two to generate server-side before the download even starts, well past
+    # Playwright's normal 30s default -- give it much more room.
+    with page.expect_download(timeout=300000) as download_info:
         page.get_by_role("button", name=re.compile("Download CSV", re.I)).last.click()
     download = download_info.value
     download.save_as(str(dest))
@@ -426,7 +468,7 @@ def step_upload_to_drive(ctx: Context) -> None:
     from googleapiclient.http import MediaFileUpload
 
     log = ctx.log
-    csv_path = TARGET_DIR / f"transaction-items-{ctx.date_dashed}.csv"
+    csv_path = TARGET_DIR / ctx.csv_filename
     if not csv_path.exists():
         raise StepFailed(f"Expected file not found: {csv_path}")
 
@@ -447,16 +489,16 @@ def step_upload_to_drive(ctx: Context) -> None:
 
 
 def step_vendsoft_login(ctx: Context) -> None:
-    page = ctx.vendsoft_page()
     username = get_keychain_secret("vendsoft-next-username")
     password = get_keychain_secret("vendsoft-next")
 
-    def fill():
+    def fill(page):
         page.get_by_label("Email or username", exact=False).fill(username)
         page.get_by_label("Password", exact=False).fill(password)
 
     _login_if_needed(
-        page, ctx.log,
+        ctx.log,
+        page_getter=ctx.vendsoft_page,
         dashboard_url=VENDSOFT_BASE,
         login_url_fragment=VENDSOFT_LOGIN_FRAGMENT,
         site_label="VendSoft",
@@ -469,7 +511,7 @@ def step_vendsoft_import(ctx: Context) -> None:
     page = ctx.vendsoft_page()
     log = ctx.log
 
-    csv_path = TARGET_DIR / f"transaction-items-{ctx.date_dashed}.csv"
+    csv_path = TARGET_DIR / ctx.csv_filename
     if not csv_path.exists():
         raise StepFailed(f"Expected file not found: {csv_path}")
 
@@ -616,14 +658,15 @@ def run(target_date: date, resume_from: Optional[str]) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--date", help="MM-DD-YYYY, defaults to yesterday", default=None)
+    parser.add_argument("--date", help="MM-DD-YYYY, label date for output files; defaults to today",
+                         default=None)
     parser.add_argument("--resume-from", help="step name to resume from", default=None)
     args = parser.parse_args()
 
     if args.date:
         target_date = datetime.strptime(args.date, "%m-%d-%Y").date()
     else:
-        target_date = date.today() - timedelta(days=1)
+        target_date = date.today()
 
     sys.exit(run(target_date, args.resume_from))
 
