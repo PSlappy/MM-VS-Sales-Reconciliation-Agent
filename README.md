@@ -1,83 +1,9 @@
-# MicroMart → VendSoft Sales Reconciliation Agent
+# MicroMart → VendSoft Daily Sync
 
-A daily automation that pulls itemized sales data out of one vendor's dashboard, archives it
-to Google Drive, and reconciles it into a second system — end to end, unattended, with MFA,
-without a human touching a keyboard.
-
-Built for [Access Amenities](https://www.accessamenities.com), a smart-vending operator, to
-close a daily manual chore: someone had to log into MicroMart (the point-of-sale platform for
-the vending units), export the previous day's itemized transactions, and hand-import that file
-into VendSoft (the operator's inventory/accounting system) — every single morning, without fail.
-
-## What it actually does
-
-```mermaid
-flowchart LR
-    A[MicroMart login\n+ auto-MFA] --> B[Download rolling\n30-day itemized CSV]
-    B --> C[Upload to\nGoogle Drive]
-    C --> D[VendSoft login\n+ session reuse]
-    D --> E[Attach CSV to\nSales Import]
-    E --> F{Known outcome?}
-    F -->|Yes| G[✅ Success email\nw/ reconciliation checks]
-    F -->|No / unrecognized| H[⚠️ Stop safely\nemail w/ screenshot + log]
-```
-
-Runs daily at 8 AM via macOS `launchd`, entirely on the operator's own machine — no cloud
-credential storage, no third-party server ever sees a password.
-
-## Why this shape, not a simpler one
-
-A handful of decisions here were less obvious than "just write a script," and are the more
-interesting part of the project:
-
-- **MFA that doesn't block automation.** The MicroMart account requires MFA. Rather than
-  disable it or need a human to hand-type a code every morning, the agent computes valid
-  TOTP codes itself from a securely-stored secret (`pyotp`) — same math an authenticator app
-  runs, minus the phone. SMS-based MFA was ruled out early specifically because it *can't* be
-  automated without paying for a receiving service.
-- **Fail loud, not silent.** Early testing surfaced a real risk: the destination system
-  (VendSoft) sometimes requires a manual machine/product-mapping step before an import
-  actually completes. Rather than assume success whenever no exception was thrown, the agent
-  explicitly checks for a small set of *known-good* outcomes and treats anything else as a
-  stop-and-notify condition — including a screenshot of exactly what it was looking at and the
-  relevant slice of the run log. Silently reporting "success" on an import that never actually
-  finished would be worse than not automating it at all.
-- **Deterministic pipeline, not an LLM driving the browser live.** The actual clicking,
-  filling, and file handling is a plain [Playwright](https://playwright.dev/python/) script —
-  repeatable and fast. An AI agent was used to *build and diagnose* it (including working out
-  UI quirks like a marketing popup intercepting clicks, and a login field implemented as a
-  floating `<label>` rather than an HTML `placeholder`, both invisible from a plain screenshot
-  glance) — but the thing that runs at 8 AM every day is ordinary, auditable code.
-- **Resumable by step, not all-or-nothing.** Every stage (login, download, upload, import) can
-  be re-run independently from a checkpoint (`--resume-from <step>`), so a fix to one broken
-  step doesn't mean re-doing everything else — including re-uploading a file that already
-  landed successfully.
-- **Credentials never touch the codebase.** Every password, TOTP secret, and OAuth token lives
-  in the local macOS Keychain or a gitignored config file, never in a shell history, chat log,
-  or commit.
-- **A rolling window instead of a single day.** MicroMart excludes failed-payment rows from a
-  day's export entirely, and a payment that fails and is later retried successfully keeps its
-  *original* transaction date rather than the retry date — so a single-day pull would
-  permanently miss it. Pulling "Last 30 Days" every run instead, relying on VendSoft's own
-  per-transaction (not per-file) duplicate detection to make the daily overlap safe, means a
-  newly-resolved retry is reconciled within a day of becoming successful.
-- **Escalate to headed only when actually needed.** Observed live in production: MicroMart
-  blocks headless Chromium logins specifically — five consecutive headless attempts hit an
-  account-level block with valid credentials and a valid TOTP code, while the identical login
-  succeeded immediately in headed (visible) mode. Rather than run headed every day just to
-  dodge a failure mode that's usually absent, the daily job stays headless by default and only
-  relaunches the browser headed if a login attempt actually fails — a visible window appears
-  only on the days it's needed, not by default.
-
-## Stack
-
-- **Python + [Playwright](https://playwright.dev/python/)** — browser automation
-- **[pyotp](https://github.com/pyauth/pyotp)** — TOTP code generation for unattended MFA
-- **Google Drive API + Gmail API** (OAuth, minimal scopes: `drive.file`, `gmail.send`) —
-  archival upload and HTML email reporting
-- **macOS `launchd`** — daily scheduling, with automatic catch-up if the machine was asleep at
-  trigger time
-- **macOS Keychain** — credential storage
+Pulls a rolling 30-day itemized sales export from MicroMart, uploads it to a shared Google
+Drive folder, imports it into VendSoft, and emails an HTML report either way. See the
+[top-level README](../README.md) for the why and the architecture overview; this doc is the
+operational reference for running and maintaining it.
 
 ## How it runs
 
@@ -160,30 +86,3 @@ default, so that download's timeout is set much higher.
 - `src/authorize_drive.py` — one-time Google OAuth consent flow
 - `src/totp_code.py` — prints a fresh 6-digit code for any Keychain-stored TOTP secret, for
   manual use (e.g. completing an MFA reset)
-
-## Status
-
-The full pipeline is live and scheduled, including the rolling 30-day pull, Drive archival, and
-VendSoft import (both the "already imported" duplicate path and the auto-resolved
-machine/product mapping path). A machine/product mapping that's genuinely *unresolved* is
-intentionally *not yet* automated — the agent stops and asks for a screenshot the first time it
-encounters that screen, rather than guess at UI it's never seen.
-
-## Deferred, by design — do not build or test speculatively
-
-Three pieces have an approved design but are **intentionally not implemented yet**, and should
-only be built the first time each scenario genuinely occurs in production — not tested
-proactively, not simulated, not triggered on purpose:
-
-- **MFA self-healing recovery flow** (detect a forced recovery-code prompt → use the stored
-  recovery code → complete the resulting forced MFA reset → rotate both the TOTP secret and
-  recovery code in Keychain automatically → always send an urgent email regardless, since
-  recovery-code usage is a security-relevant event even when it self-heals). Design approved.
-  **Do not build, wire in, or test this against the real account** outside of an actual live
-  occurrence — deliberately triggering it to test it is exactly the kind of repeated-login-churn
-  that caused a real account lockout during development. Build it live, from the real screen,
-  the first time it's actually needed.
-- **Genuinely unresolved machine mapping** (VendSoft shows a nonzero "Machines to review"
-  count) — no screenshot exists yet; tabled until it happens naturally.
-- **Genuinely unresolved product mapping** (nonzero "Products to review") — same; tabled until
-  it happens naturally.
