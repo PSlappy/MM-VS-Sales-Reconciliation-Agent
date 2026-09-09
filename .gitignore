@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.csv
+*credentials*.json
+*service-account*.json
+*oauth-client*.json
+*client_secret*.json
+config/*token*.json
+logs/*.log
+browser-state/
+debug-screenshots/
+.DS_Store
+
+# Environment-specific, not code -- real values live only on the local machine.
+config/drive-folder-id.txt
+config/notify-recipients.txt

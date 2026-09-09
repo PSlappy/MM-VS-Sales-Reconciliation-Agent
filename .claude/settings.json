@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git add *)",
+      "Bash(git commit -m *)",
+      "Bash(git push)",
+      "Bash(git push origin main)",
+      "Bash(git log)",
+      "Bash(git log *)"
+    ]
+  }
+}
