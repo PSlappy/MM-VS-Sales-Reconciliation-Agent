@@ -56,6 +56,16 @@ def main() -> None:
     date_str = target_date.strftime("%m-%d-%Y")
     csv_filename = f"transaction-items-last30days-{date_str}.csv"
 
+    # Runs at both the 8 AM calendar trigger AND at login/boot (RunAtLoad), so a login-time
+    # catch-up run actually happens if the Mac was fully off (not just asleep) at 8 AM --
+    # launchd's calendar-interval catch-up only covers sleep, not a real shutdown. Skip if
+    # today's sync already completed successfully, so an ordinary 8-AM-awake day plus a later
+    # login/reboot doesn't trigger a duplicate run and a duplicate email.
+    log_file = sync.LOG_DIR / f"{target_date.strftime('%Y-%m-%d')}.log"
+    if log_file.exists() and "All steps completed" in log_file.read_text():
+        print(f"{date_str} already completed successfully earlier today -- skipping.")
+        sys.exit(0)
+
     crash_message = None
     try:
         exit_code = sync.run(target_date, resume_from=None)
@@ -63,7 +73,6 @@ def main() -> None:
         exit_code = 1
         crash_message = f"{type(e).__name__}: {e}"
 
-    log_file = sync.LOG_DIR / f"{target_date.strftime('%Y-%m-%d')}.log"
     log_text = log_file.read_text() if log_file.exists() else ""
 
     if exit_code == 0 and crash_message is None:

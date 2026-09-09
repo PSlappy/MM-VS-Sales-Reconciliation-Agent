@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.accessamenities.micromart-vendsoft-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync/.venv/bin/python</string>
+        <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync/src/run_daily.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SYNC_HEADLESS</key>
+        <string>1</string>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync/logs/launchd-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync/logs/launchd-stderr.log</string>
+</dict>
+</plist>

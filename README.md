@@ -14,12 +14,18 @@ operational reference for running and maintaining it.
 - **With reporting**: `.venv/bin/python src/run_daily.py` — same pipeline, labels output by
   today's date automatically, and always sends a success or failure email afterward. This is
   the exact entry point the schedule calls.
-- **On a schedule**: a macOS `launchd` LaunchAgent
-  (`~/Library/LaunchAgents/com.accessamenities.micromart-vendsoft-sync.plist`) runs
-  `run_daily.py` headlessly every day at 8:00 AM. If the Mac is asleep at that moment, `launchd`
-  runs it once as soon as the machine wakes rather than skipping the day. If a login attempt
-  fails while headless, it automatically retries headed (see Failure handling below) — a visible
-  Chrome window only appears when that happens.
+- **On a schedule**: a macOS `launchd` LaunchAgent (canonical copy in
+  [`launchd/`](launchd/), installed at
+  `~/Library/LaunchAgents/com.accessamenities.micromart-vendsoft-sync.plist`) runs
+  `run_daily.py` headlessly every day at 8:00 AM. If the Mac is merely *asleep* at that moment,
+  `launchd`'s calendar-interval catch-up fires it once on wake. If the Mac is fully *shut down*
+  (confirmed in production: a missed 8 AM this way left `runs = 0` in `launchctl print` --
+  calendar-interval catch-up only covers sleep, since `launchd` itself isn't running during a
+  real shutdown), `RunAtLoad` provides a second path: the job also fires once at every
+  login/boot, but skips itself if today's log already shows a successful run, so a normal
+  8-AM-awake day plus a later login doesn't trigger a duplicate run and a duplicate email. If a
+  login attempt fails while headless, it automatically retries headed (see Failure handling
+  below) — a visible Chrome window only appears when that happens.
 
 Valid `--resume-from` step names: `micromart_login`, `micromart_filter_and_download`,
 `upload_to_drive`, `vendsoft_login`, `vendsoft_import`.
