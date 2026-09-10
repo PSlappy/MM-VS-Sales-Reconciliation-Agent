@@ -544,6 +544,20 @@ def step_vendsoft_import(ctx: Context) -> None:
     page.wait_for_timeout(3000)
     page.mouse.wheel(0, 400)
     page.wait_for_timeout(500)
+
+    # VendSoft parses/dedupes the file server-side after attach (visible as a progress bar).
+    # Wait for that to actually finish -- either the import button renders, or (for a batch
+    # that turns out to be fully duplicate) it never does -- before reading any status text.
+    # Reading too early can catch a mid-processing page: confirmed live 2026-09-10, an early
+    # read matched a stray "already imported" label from the attempt-history list below the
+    # fold while the current attempt's real result panel was still loading, causing the step
+    # to report success without ever clicking the actual import button.
+    import_button = page.get_by_role("button", name=re.compile(r"^IMPORT .*TRANSACTIONS$", re.I))
+    try:
+        import_button.first.wait_for(state="visible", timeout=60000)
+    except PlaywrightTimeoutError:
+        pass
+
     page.screenshot(path=str(DEBUG_DIR / "vendsoft-sales-import-after-attach.png"), full_page=True)
 
     # VendSoft's own docs describe two more required steps we haven't automated yet:
@@ -557,19 +571,16 @@ def step_vendsoft_import(ctx: Context) -> None:
     except Exception as e:
         page_text = f"(could not capture page text: {e})"
 
-    if re.search("already imported", page_text, re.I):
-        stats = _extract_vendsoft_stats(page_text, outcome="already_imported")
-        log.info("VENDSOFT_IMPORT_STATS: %s", json.dumps(stats))
-        return
-
-    # Second known-good path: VendSoft's mapping-review screen (docs steps 3-4), but only
-    # when everything already auto-resolved -- 0 machines/products left to review. If
-    # anything is actually unresolved, this is exactly the manual-mapping scenario flagged
-    # as a future gap -- stop safely and ask for a screenshot rather than guess at a UI
-    # that requires picking from a list we've never seen.
+    # Check the actionable "ready to import" screen FIRST. This must come before the
+    # "already imported" text check below: VendSoft's page also lists a history of past
+    # import attempts, and past entries there can legitimately be labeled "already imported"
+    # even while the CURRENT attempt still has new transactions ready and an unclicked
+    # import button -- a bare substring search over the whole page matches that history
+    # text and returns early without ever importing anything (confirmed live 2026-09-10:
+    # a batch with 9 ready transactions, 0 machines/products to review, and a visible
+    # "IMPORT 9 TRANSACTIONS" button was wrongly reported as already_imported).
     machines_review = re.search(r"Machines to review\D*(\d+)", page_text)
     products_review = re.search(r"Products to review\D*(\d+)", page_text)
-    import_button = page.get_by_role("button", name=re.compile(r"^IMPORT .*TRANSACTIONS$", re.I))
 
     if (
         machines_review and products_review
@@ -588,6 +599,14 @@ def step_vendsoft_import(ctx: Context) -> None:
         except Exception as e:
             post_text = f"(could not capture post-import page text: {e})"
         stats = _extract_vendsoft_stats(post_text, outcome="imported")
+        log.info("VENDSOFT_IMPORT_STATS: %s", json.dumps(stats))
+        return
+
+    # Only treat "already imported" as a terminal, nothing-to-do state once the actionable
+    # path above has been ruled out -- and only when there's no live import button, as an
+    # extra guard against the same history-text false positive.
+    if re.search("already imported", page_text, re.I) and import_button.count() == 0:
+        stats = _extract_vendsoft_stats(page_text, outcome="already_imported")
         log.info("VENDSOFT_IMPORT_STATS: %s", json.dumps(stats))
         return
 
