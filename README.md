@@ -140,6 +140,14 @@ Valid `--resume-from` step names: `micromart_login`, `micromart_filter_and_downl
   auto-clicks the final import confirmation when everything already auto-resolved. An
   unresolved mapping stops safely and asks for a screenshot rather than guessing at a picker UI
   it's never seen.
+- **Retry button in failure emails**: a transient crash (a click timeout, a network blip) gets
+  a one-click "Retry Now" in its email, so anyone with the email — not just whoever's at a
+  terminal — can act on it. A deliberate stop (like the unresolved-mapping gap above) gets a
+  link straight to the page it happened on instead, with no retry offered, since retrying that
+  automatically would just fail the same way again. See
+  [`docs/retry-trigger-setup.md`](docs/retry-trigger-setup.md) for the mechanism (a small
+  Google Apps Script Web App this Mac polls every 5 minutes, only on days that need it) and
+  one-time setup — optional, the tool works the same without it, just without the button.
 
 ## MicroMart CSV export behavior (confirmed)
 
@@ -169,6 +177,11 @@ default, so that download's timeout is set much higher.
 - `src/authorize_drive.py` — one-time Google OAuth consent flow
 - `src/totp_code.py` — prints a fresh 6-digit code for any Keychain-stored TOTP secret, for
   manual use (e.g. completing an MFA reset)
+- `src/retry_trigger.py` — shared helpers for the failure-email Retry button (builds the link,
+  polls the flag)
+- `src/check_retry_trigger.py` — scheduled entry point (every 5 min) that acts on a Retry click
+- `apps-script/retry-webapp.gs` — the public receiver for that click, deployed separately (see
+  `docs/retry-trigger-setup.md`)
 
 ## Status
 
