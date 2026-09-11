@@ -433,8 +433,22 @@ def step_micromart_filter_and_download(ctx: Context) -> None:
     _wait_settled(page)
     _dismiss_hubspot_popup(page, log)
 
-    # Opens the Download CSV dropdown (trigger button, before the menu exists).
-    page.get_by_role("button", name=re.compile("Download CSV", re.I)).first.click()
+    # Opens the Download CSV dropdown (trigger button, before the menu exists). Retry once
+    # on a timeout -- confirmed live 2026-09-11, this click hung for the full 30s despite
+    # the element reporting visible/enabled/stable right before, then succeeded immediately
+    # on a fresh attempt (page reload + re-dismiss popup), consistent with a one-off flaky
+    # paint/overlay rather than a real selector problem.
+    for attempt in (1, 2):
+        try:
+            page.get_by_role("button", name=re.compile("Download CSV", re.I)).first.click()
+            break
+        except PlaywrightTimeoutError:
+            if attempt == 2:
+                raise
+            log.warning("Download CSV button click timed out -- reloading and retrying once.")
+            _goto(page, MICROMART_TRANSACTIONS)
+            _wait_settled(page)
+            _dismiss_hubspot_popup(page, log)
 
     # "Last 30 Days" is the modal's default when no date filter is applied -- click it
     # explicitly anyway rather than relying on that default holding.
