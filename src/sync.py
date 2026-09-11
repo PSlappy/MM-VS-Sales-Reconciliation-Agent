@@ -203,7 +203,10 @@ class Context:
         return self._persistent_page("_vendsoft_ctx", "vendsoft-profile", force_headed)
 
     def screenshot_all(self, tag: str) -> list:
-        """Screenshot whichever browser page(s) are currently open, for failure diagnostics."""
+        """Screenshot whichever browser page(s) are currently open, for failure diagnostics.
+        Also logs each page's URL (FAILURE_URL) -- used to build a direct "go to the page
+        where this happened" link in the failure email for issues that need a person to
+        resolve them (e.g. unmapped machines/products), rather than a blind auto-retry."""
         paths = []
         DEBUG_DIR.mkdir(exist_ok=True)
         for label, browser_ctx in (("micromart", self._micromart_ctx), ("vendsoft", self._vendsoft_ctx)):
@@ -216,6 +219,7 @@ class Context:
                 path = DEBUG_DIR / f"failure-{tag}-{label}.png"
                 page.screenshot(path=str(path))
                 paths.append(path)
+                self.log.error("FAILURE_URL: %s %s", label, page.url)
             except Exception:
                 pass
         return paths

@@ -202,6 +202,12 @@ def render_success_html(date_str: str, csv_filename: str, csv_row_count, stats: 
     return _wrap("#16a34a", f"Sync succeeded — {date_str}", body)
 
 
+def _button(href: str, label: str, color: str = "#2563eb") -> str:
+    return (f'<a href="{html.escape(href)}" target="_blank" rel="noopener" '
+            f'style="display:inline-block;background:{color};color:#ffffff;text-decoration:none;'
+            f'font-weight:bold;font-size:14px;padding:10px 20px;border-radius:6px;">{html.escape(label)}</a>')
+
+
 def render_failure_html(
     date_str: str,
     failed_step: str,
@@ -210,6 +216,9 @@ def render_failure_html(
     failed_at: str,
     log_excerpt: str,
     screenshot_count: int = 0,
+    is_transient: bool = False,
+    retry_link: str = None,
+    manual_action_link: str = None,
 ) -> str:
     screenshots_html = ""
     if screenshot_count:
@@ -222,6 +231,28 @@ def render_failure_html(
         {imgs}
         """
 
+    # Two different action prompts, matching how the failure was classified in run_daily.py:
+    # a transient crash gets a one-click Retry (safe to re-attempt automatically); a
+    # deliberate stop (e.g. unmapped machines/products) gets a link straight to the page it
+    # happened on instead -- retrying that automatically would just fail the same way again,
+    # and re-attempts an unattended login for no reason.
+    if is_transient and retry_link:
+        action_html = f"""\
+        <div style="text-align:center;background:#eff6ff;border-radius:8px;padding:20px;margin:16px 0;">
+          <p style="margin:0 0 12px 0;">This looks like a temporary glitch. Click below to have it
+             retried automatically &mdash; picked up within a few minutes, as long as the Mac is on.</p>
+          {_button(retry_link, "Retry Now")}
+        </div>"""
+    elif not is_transient and manual_action_link:
+        action_html = f"""\
+        <div style="text-align:center;background:#fef3c7;border-radius:8px;padding:20px;margin:16px 0;">
+          <p style="margin:0 0 12px 0;">This needs a person to resolve it directly &mdash; automatic
+             retry won't fix it. See "Why" above, then:</p>
+          {_button(manual_action_link, "Open the page where this happened", color="#b45309")}
+        </div>"""
+    else:
+        action_html = ""
+
     body = f"""\
     <p>The daily MicroMart &rarr; VendSoft sync <strong>failed</strong> for <strong>{html.escape(date_str)}</strong>
        and has stopped &mdash; it will not keep retrying on its own beyond the built-in attempts.</p>
@@ -233,8 +264,9 @@ def render_failure_html(
       <tr><td style="padding:6px 0;color:#6b7280;vertical-align:top;">Why</td>
           <td style="padding:6px 0;">{html.escape(error_message)}</td></tr>
     </table>
+    {action_html}
     {screenshots_html}
-    <p><strong>Action needed:</strong> fix the issue, then resume with:</p>
+    <p><strong>Or fix it by hand and resume from the terminal:</strong></p>
     <pre style="background:#f3f4f6;padding:12px;border-radius:6px;overflow-x:auto;font-size:12px;">{html.escape(resume_hint)}</pre>
     <p style="margin-top:20px;"><strong>Full run log:</strong></p>
     <pre style="background:#111827;color:#e5e7eb;padding:12px;border-radius:6px;overflow-x:auto;font-size:11px;max-height:400px;">{html.escape(log_excerpt)}</pre>

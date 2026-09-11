@@ -16,3 +16,4 @@ debug-screenshots/
 # Environment-specific, not code -- real values live only on the local machine.
 config/drive-folder-id.txt
 config/notify-recipients.txt
+config/retry-webapp-url.txt

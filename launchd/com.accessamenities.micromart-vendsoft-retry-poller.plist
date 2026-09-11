@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.accessamenities.micromart-vendsoft-retry-poller</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync/.venv/bin/python</string>
+        <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync/src/check_retry_trigger.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SYNC_HEADLESS</key>
+        <string>1</string>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+    </dict>
+
+    <!-- Every 5 minutes. Cheap on every ordinary run -- see check_retry_trigger.py's own
+         docstring for why this doesn't mean a network call every 5 minutes on a normal day. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <!-- Also check right at login/boot, so a retry click made while the Mac was off or asleep
+         gets picked up as soon as it's back, instead of waiting for the next 5-minute tick. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync/logs/retry-poller-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/patrickshea/github/access-amenities-tools/micromart-vendsoft-sync/logs/retry-poller-stderr.log</string>
+</dict>
+</plist>
