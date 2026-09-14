@@ -134,7 +134,32 @@ def _stat_row(label: str, value) -> str:
             f'{html.escape(label)}</td><td style="padding:6px 0;">{display}</td></tr>')
 
 
-def render_success_html(date_str: str, csv_filename: str, csv_row_count, stats: dict) -> str:
+def _product_resolution_note(resolution: dict) -> str:
+    """Shared "here's what the matching logic did on its own" block -- used both in a success
+    email (everything resolved confidently, import went ahead) and in the needs-review email
+    (something didn't, so nothing's imported yet, but this part still happened for real)."""
+    if not resolution or not (resolution.get("mapped") or resolution.get("created")):
+        return ""
+    items = []
+    for m in resolution.get("mapped", []):
+        items.append(f'<li><strong>{html.escape(m["product_name"])}</strong> &rarr; mapped to '
+                      f'existing product <strong>{html.escape(m["mapped_to"])}</strong> '
+                      f'({html.escape(str(m.get("code") or ""))}, {m["score"]:.0%} word match)</li>')
+    for c in resolution.get("created", []):
+        code = html.escape(str(c.get("code") or "(auto-assigned)"))
+        items.append(f'<li><strong>{html.escape(c["product_name"])}</strong> &rarr; no existing '
+                      f'match found, created as a <strong>new product</strong> ({code})</li>')
+    return f"""\
+    <p style="background:#f9fafb;border-radius:6px;padding:10px 12px;font-size:13px;margin-top:8px;">
+      <strong>Product mapping handled automatically &mdash; worth a quick review:</strong>
+      <ul style="margin:8px 0 0 0;padding-left:20px;">{"".join(items)}</ul>
+      <span style="color:#6b7280;">A mapping can be corrected in VendSoft after the fact with no
+      risk to what's already imported, so this isn't blocking &mdash; just flagging it.</span>
+    </p>"""
+
+
+def render_success_html(date_str: str, csv_filename: str, csv_row_count, stats: dict,
+                         product_resolution: dict = None) -> str:
     outcome = stats.get("outcome")
     vendsoft_rows = stats.get("rows")
 
@@ -190,6 +215,7 @@ def render_success_html(date_str: str, csv_filename: str, csv_row_count, stats: 
     <p style="background:#f9fafb;border-radius:6px;padding:10px 12px;font-size:13px;margin-top:8px;">
       <strong>New vs. already-imported:</strong><br>{materialized_check}
     </p>"""
+    checks_html += _product_resolution_note(product_resolution)
 
     body = f"""\
     <p>The daily MicroMart &rarr; VendSoft sync completed successfully for <strong>{html.escape(date_str)}</strong>.</p>
@@ -272,3 +298,71 @@ def render_failure_html(
     <pre style="background:#111827;color:#e5e7eb;padding:12px;border-radius:6px;overflow-x:auto;font-size:11px;max-height:400px;">{html.escape(log_excerpt)}</pre>
     """
     return _wrap("#dc2626", f"ACTION NEEDED — sync failed — {date_str}", body)
+
+
+def render_product_review_html(
+    date_str: str,
+    resolution: dict,
+    page_link: str = None,
+    retry_link: str = None,
+    screenshot_count: int = 0,
+    log_excerpt: str = "",
+) -> str:
+    """A calmer third outcome, distinct from both success and failure: nothing's imported yet
+    for today, but this isn't broken -- one or more products just need a person's judgment call
+    that the matching logic wasn't confident enough to make on its own. Everything else in the
+    batch that *could* be resolved automatically already was (see the note below, if anything)."""
+    ambiguous = resolution.get("ambiguous", [])
+
+    items_html = ""
+    for item in ambiguous:
+        candidate_line = (
+            f'Best guess: <strong>{html.escape(item["best_candidate"])}</strong> '
+            f'({html.escape(str(item.get("best_code") or ""))}, {item["score"]:.0%} word match) '
+            f'&mdash; not confident enough to trust on its own.'
+            if item.get("best_candidate") else
+            "No plausible existing product found, but also not clearly new enough to auto-create."
+        )
+        considered = ", ".join(html.escape(c) for c in item.get("candidates_considered", [])[:5])
+        items_html += f"""\
+        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:12px;margin:8px 0;">
+          <strong>{html.escape(item["product_name"])}</strong><br>
+          <span style="font-size:13px;">{candidate_line}</span>
+          {f'<br><span style="color:#9ca3af;font-size:12px;">Considered: {considered}</span>' if considered else ""}
+        </div>"""
+
+    resolved_note = _product_resolution_note(resolution)
+
+    screenshots_html = ""
+    if screenshot_count:
+        imgs = "".join(
+            f'<img src="cid:shot{i}" style="max-width:100%;border:1px solid #e5e7eb;border-radius:6px;margin:8px 0;display:block;">'
+            for i in range(screenshot_count)
+        )
+        screenshots_html = f'<p><strong>Screen at this point:</strong></p>{imgs}'
+
+    buttons = ""
+    if page_link:
+        buttons += _button(page_link, "Open the product mapping page", color="#b45309")
+    if retry_link:
+        buttons += f'<span style="display:inline-block;width:12px;"></span>' + \
+            _button(retry_link, "Retry once resolved", color="#2563eb")
+
+    body = f"""\
+    <p>{len(ambiguous)} product{"s" if len(ambiguous) != 1 else ""} in today's
+       (<strong>{html.escape(date_str)}</strong>) batch need a quick decision before the import
+       can complete. <strong>This isn't a failure</strong> &mdash; the matching logic already
+       handled everything else in the batch it could confidently decide on its own; these just
+       need a person to pick.</p>
+    {items_html}
+    {resolved_note}
+    <div style="text-align:center;margin:20px 0;">{buttons}</div>
+    {screenshots_html}
+    <p style="margin-top:20px;color:#6b7280;font-size:13px;">In VendSoft: <strong>Choose</strong>
+       on the product &rarr; <strong>Map to existing</strong> (search for it) or
+       <strong>Create new</strong> if it's genuinely new &rarr; the import can then complete
+       normally (by hand, or via Retry above).</p>
+    <p style="margin-top:20px;"><strong>Full run log:</strong></p>
+    <pre style="background:#111827;color:#e5e7eb;padding:12px;border-radius:6px;overflow-x:auto;font-size:11px;max-height:400px;">{html.escape(log_excerpt)}</pre>
+    """
+    return _wrap("#d97706", f"Product mapping needs a look — {date_str}", body)

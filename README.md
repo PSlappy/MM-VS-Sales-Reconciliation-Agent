@@ -135,19 +135,32 @@ Valid `--resume-from` step names: `micromart_login`, `micromart_filter_and_downl
   finishing an MFA reset by hand). If a login ever hits an unrecognized screen (e.g. a real
   one-time-code challenge from a *different* auth method), it stops and asks for one manual
   login rather than guessing.
-- **Known gap, by design**: a machine/product mapping that's genuinely *unresolved* (VendSoft
-  shows a nonzero "Machines/Products to review" count) isn't automated -- the agent only
-  auto-clicks the final import confirmation when everything already auto-resolved. An
-  unresolved mapping stops safely and asks for a screenshot rather than guessing at a picker UI
-  it's never seen.
+- **New product mapping is auto-resolved, conservatively.** When VendSoft's own matcher flags
+  a product as needing review, `src/product_matching.py` scores every candidate VendSoft's
+  search turns up (word-overlap similarity, not just "first result") and only acts when
+  confident: a clear winner gets mapped to it, no plausible candidate at all gets created as a
+  new product, and anything in between — plausible but not clearly the right one — is left
+  alone rather than guessed at. Every auto-mapped or auto-created product is still flagged in
+  the email for a quick human review (low-risk since VendSoft lets you correct a mapping after
+  the fact with no effect on what's already imported), and anything genuinely ambiguous blocks
+  the import and sends a calm "needs a look" email instead of a scary failure one. See
+  `product_matching.py`'s module docstring for the scoring details and the real
+  Hippeas/Gatorade/Doritos cases it was tuned against.
+- **Machine mapping is still a known gap, by design.** A nonzero "Machines to review" count
+  isn't automated — the agent only auto-clicks the final import confirmation when machines are
+  already at 0. An unresolved machine mapping stops safely and asks for a screenshot rather
+  than guessing at a picker UI it's never seen (no real occurrence yet to build it against).
 - **Retry button in failure emails**: a transient crash (a click timeout, a network blip) gets
   a one-click "Retry Now" in its email, so anyone with the email — not just whoever's at a
-  terminal — can act on it. A deliberate stop (like the unresolved-mapping gap above) gets a
+  terminal — can act on it. A deliberate stop (like the machine-mapping gap above) gets a
   link straight to the page it happened on instead, with no retry offered, since retrying that
-  automatically would just fail the same way again. See
-  [`docs/retry-trigger-setup.md`](docs/retry-trigger-setup.md) for the mechanism (a small
-  Google Apps Script Web App this Mac polls every 5 minutes, only on days that need it) and
-  one-time setup — optional, the tool works the same without it, just without the button.
+  automatically would just fail the same way again. An ambiguous *product* mapping is a third
+  case in between: it gets both the page link and a Retry button, since once a person resolves
+  it by hand in VendSoft, retrying is exactly the right next step (no repeated-login risk the
+  way a login failure has). See [`docs/retry-trigger-setup.md`](docs/retry-trigger-setup.md)
+  for the mechanism (a small Google Apps Script Web App this Mac polls every 5 minutes, only on
+  days that need it) and one-time setup — optional, the tool works the same without it, just
+  without the button.
 
 ## MicroMart CSV export behavior (confirmed)
 
@@ -165,9 +178,16 @@ default, so that download's timeout is set much higher.
   `<label>`s, not HTML `placeholder` attributes — target them with `get_by_label`, not
   `get_by_placeholder`.
 - After attaching a file, VendSoft shows a mapping-review screen with "Machines to review" /
-  "Products to review" counts. When both are 0 (everything auto-resolved), an "IMPORT N
-  TRANSACTIONS" button appears and gets clicked automatically. A nonzero count means genuine
-  manual mapping is needed -- see the known gap above.
+  "Products to review" counts. When both are 0, an "IMPORT N TRANSACTIONS" button appears and
+  gets clicked automatically. A nonzero *products* count is now handled too (see product
+  mapping above); a nonzero *machines* count still isn't -- see the known gap above.
+- The "Search VendSoft products" box on that mapping screen (confirmed live 2026-09-14) is a
+  plain case-insensitive substring filter evaluated client-side against the product catalog --
+  no network request per keystroke, and no relevance ranking of its own (e.g. searching
+  "gator" returns both "Gatorade Zero Fruit Punch" and "Gatorade Zero Glacier Freeze" with no
+  indication which is the better match -- that's on `product_matching.py` to figure out).
+  Selecting a result fills the box and enables "Save"; "Create new" prepopulates Name/Code from
+  the CSV row.
 
 ## Files
 
@@ -182,18 +202,20 @@ default, so that download's timeout is set much higher.
 - `src/check_retry_trigger.py` — scheduled entry point (every 5 min) that acts on a Retry click
 - `apps-script/retry-webapp.gs` — the public receiver for that click, deployed separately (see
   `docs/retry-trigger-setup.md`)
+- `src/product_matching.py` — pure scoring logic for auto-resolving product mapping (no
+  Playwright dependency, easy to test in isolation)
 
 ## Status
 
 The full pipeline is live and scheduled, including the rolling 30-day pull, Drive archival, and
-VendSoft import (both the "already imported" duplicate path and the auto-resolved
-machine/product mapping path). A machine/product mapping that's genuinely *unresolved* is
-intentionally *not yet* automated — the agent stops and asks for a screenshot the first time it
-encounters that screen, rather than guess at UI it's never seen.
+VendSoft import (the "already imported" duplicate path, the auto-resolved path, and now
+confidence-based auto-resolution of new *product* mapping — see above). A *machine* mapping
+that's genuinely unresolved is still intentionally not automated — the agent stops and asks for
+a screenshot the first time it encounters that screen, rather than guess at UI it's never seen.
 
 ## Deferred, by design — do not build or test speculatively
 
-Three pieces have an approved design but are **intentionally not implemented yet**, and should
+Two pieces have an approved design but are **intentionally not implemented yet**, and should
 only be built the first time each scenario genuinely occurs in production — not tested
 proactively, not simulated, not triggered on purpose:
 
@@ -206,9 +228,10 @@ proactively, not simulated, not triggered on purpose:
   that caused a real account lockout during development. Build it live, from the real screen,
   the first time it's actually needed.
 - **Genuinely unresolved machine mapping** (VendSoft shows a nonzero "Machines to review"
-  count) — no screenshot exists yet; tabled until it happens naturally.
-- **Genuinely unresolved product mapping** (nonzero "Products to review") — same; tabled until
-  it happens naturally.
+  count) — no screenshot exists yet; tabled until it happens naturally. (Product mapping had
+  the same status until 2026-09-14, when the Hippeas/Nacho-Cheese-Doritos occurrences gave
+  enough real examples to build and validate `product_matching.py` against — see above. Machine
+  mapping is waiting on the same kind of real trigger before it's worth building.)
 
 ## Future: hosting beyond this Mac (tabled, revisit on request)
 

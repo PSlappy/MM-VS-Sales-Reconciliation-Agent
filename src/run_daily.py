@@ -41,7 +41,8 @@ def _last_match(pattern: str, text: str):
 
 
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
-_KEEP_MARKERS = ("[ERROR]", "[WARNING]", "=== step:", "FAILURE_SCREENSHOT")
+_KEEP_MARKERS = ("[ERROR]", "[WARNING]", "=== step:", "FAILURE_SCREENSHOT",
+                  "PRODUCT_AUTO_RESOLVED", "PRODUCT_MAPPING_NEEDS_REVIEW")
 
 
 def _important_log_lines(log_text: str, max_lines: int = 50) -> str:
@@ -104,8 +105,12 @@ def main() -> None:
         stats = json.loads(stats_raw) if stats_raw else {"outcome": None}
         csv_row_count_raw = _last_match(r"CSV_ROW_COUNT: (\d+)", log_text)
         csv_row_count = int(csv_row_count_raw) if csv_row_count_raw else None
+        resolution_raw = _last_match(r"PRODUCT_AUTO_RESOLVED: (.+)", log_text)
+        product_resolution = json.loads(resolution_raw) if resolution_raw else None
 
-        html = email_report.render_success_html(date_str, csv_filename, csv_row_count, stats)
+        html = email_report.render_success_html(
+            date_str, csv_filename, csv_row_count, stats, product_resolution=product_resolution,
+        )
         email_report.send_email(f"MicroMart sync succeeded - {date_str}", html)
     else:
         failed_step = _last_match(r"=== step: (\S+) ===", log_text) or "(unknown)"
@@ -114,39 +119,64 @@ def main() -> None:
             f"--resume-from {failed_step} --date {date_str}"
         failed_at = _last_match(r"^(\S+ \S+) \[ERROR\]", log_text) or "(unknown time)"
         screenshot_paths = re.findall(r"FAILURE_SCREENSHOT: (.+)", log_text)
+        site = _STEP_SITE.get(failed_step)
+        page_link = None
+        if site:
+            page_link = _last_match(rf"FAILURE_URL: {re.escape(site)} (\S+)", log_text)
 
-        # Two different failure shapes, matching sync.py's own two except branches: an
-        # unexpected crash (transient -- a timeout, a network blip) is safe to retry
-        # automatically, while a deliberate StepFailed (e.g. unmapped machines/products) will
-        # just fail the exact same way again until a person resolves it in the actual site --
-        # retrying it automatically would only waste an unattended login attempt for nothing
-        # (and repeated login churn is exactly what caused a real MFA lockout during
-        # development). So: transient gets a Retry button; deliberate gets a link to the page
-        # where it happened instead, with no retry offered.
-        is_transient = "crashed unexpectedly" in log_text
+        needs_review_raw = _last_match(r"PRODUCT_MAPPING_NEEDS_REVIEW: (.+)", log_text)
 
-        retry_link = None
-        manual_action_link = None
-        if is_transient:
+        if needs_review_raw:
+            # A third outcome, distinct from both transient and deliberate failures below:
+            # nothing's broken, a person just needs to make a call the matching logic wasn't
+            # confident enough to make. A retry here IS worth offering (unlike a plain
+            # StepFailed) -- once the mapping is fixed by hand in VendSoft, resuming just
+            # re-attaches the same file and re-checks, no repeated login risk involved.
+            resolution = json.loads(needs_review_raw)
+            retry_link = None
             try:
                 retry_link = retry_trigger.build_retry_link(date_str)
             except Exception as e:
                 print(f"Could not build retry link (retry trigger not set up yet?): {e}", file=sys.stderr)
-        else:
-            site = _STEP_SITE.get(failed_step)
-            if site:
-                url_match = _last_match(rf"FAILURE_URL: {re.escape(site)} (\S+)", log_text)
-                manual_action_link = url_match
 
-        html = email_report.render_failure_html(
-            date_str, failed_step, error_message, resume_hint,
-            failed_at=failed_at, log_excerpt=_important_log_lines(log_text),
-            screenshot_count=len(screenshot_paths),
-            is_transient=is_transient, retry_link=retry_link, manual_action_link=manual_action_link,
-        )
-        email_report.send_email(
-            f"ACTION NEEDED: MicroMart sync failed - {date_str}", html, image_paths=screenshot_paths,
-        )
+            html = email_report.render_product_review_html(
+                date_str, resolution, page_link=page_link, retry_link=retry_link,
+                screenshot_count=len(screenshot_paths), log_excerpt=_important_log_lines(log_text),
+            )
+            email_report.send_email(
+                f"Product mapping needs a look - MicroMart sync - {date_str}", html,
+                image_paths=screenshot_paths,
+            )
+        else:
+            # Two different failure shapes, matching sync.py's own two except branches: an
+            # unexpected crash (transient -- a timeout, a network blip) is safe to retry
+            # automatically, while any other deliberate StepFailed will just fail the exact
+            # same way again until a person resolves it in the actual site -- retrying it
+            # automatically would only waste an unattended login attempt for nothing (and
+            # repeated login churn is exactly what caused a real MFA lockout during
+            # development). So: transient gets a Retry button; deliberate gets a link to the
+            # page where it happened instead, with no retry offered.
+            is_transient = "crashed unexpectedly" in log_text
+
+            retry_link = None
+            manual_action_link = None
+            if is_transient:
+                try:
+                    retry_link = retry_trigger.build_retry_link(date_str)
+                except Exception as e:
+                    print(f"Could not build retry link (retry trigger not set up yet?): {e}", file=sys.stderr)
+            else:
+                manual_action_link = page_link
+
+            html = email_report.render_failure_html(
+                date_str, failed_step, error_message, resume_hint,
+                failed_at=failed_at, log_excerpt=_important_log_lines(log_text),
+                screenshot_count=len(screenshot_paths),
+                is_transient=is_transient, retry_link=retry_link, manual_action_link=manual_action_link,
+            )
+            email_report.send_email(
+                f"ACTION NEEDED: MicroMart sync failed - {date_str}", html, image_paths=screenshot_paths,
+            )
 
     sys.exit(exit_code)
 

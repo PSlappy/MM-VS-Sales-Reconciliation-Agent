@@ -27,11 +27,13 @@ import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from playwright.sync_api import sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+import product_matching
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
@@ -525,6 +527,126 @@ def step_vendsoft_login(ctx: Context) -> None:
     )
 
 
+_REVIEW_ITEM_RE = re.compile(r"\n+(.+?)\n+\d+ item lines? · \d+ transactions? · \S+\n")
+
+_MAX_PRODUCT_REVIEW_ITEMS = 10  # safety cap -- see _resolve_product_mappings
+
+
+def _resolve_product_mappings(page, log: logging.Logger) -> dict:
+    """Auto-resolves VendSoft's "Products to review" list where confident, and leaves
+    anything genuinely ambiguous for a person -- see product_matching.py for the scoring
+    logic and the reasoning behind the three outcomes. Confirmed live 2026-09-14 against the
+    real "Map to existing" / "Create new" UI: search is a plain client-side substring filter
+    (page.get_by_role("option") for results), selecting a result enables "Save", and "Create
+    new" prepopulates Name/Code from the CSV row.
+
+    Deliberately never touches "Machines to review" -- that's a separate, still-deferred gap
+    (see the README's "Deferred" section); this only runs when machines are already 0."""
+    summary = {"mapped": [], "created": [], "ambiguous": []}
+
+    for _ in range(_MAX_PRODUCT_REVIEW_ITEMS):
+        try:
+            page_text = page.locator("body").inner_text()
+        except Exception:
+            break
+        names = _REVIEW_ITEM_RE.findall(page_text)
+        choose_buttons = page.get_by_role("button", name=re.compile("^Choose$", re.I))
+        if not names or choose_buttons.count() == 0:
+            break
+        product_name = names[0].strip()
+
+        choose_buttons.first.click()
+        page.wait_for_timeout(800)
+        try:
+            page.get_by_text(re.compile("^Map to existing$", re.I)).click()
+            page.wait_for_timeout(300)
+        except Exception:
+            pass  # already the active tab
+
+        search_box = page.get_by_placeholder(re.compile("Search VendSoft products", re.I))
+        if search_box.count() == 0:
+            search_box = page.locator("input[type='text']").last
+
+        terms = product_matching.search_terms(product_name) or [product_name]
+        candidate_texts: List[str] = []
+        for term in terms[:3]:
+            search_box.fill("")
+            search_box.type(term, delay=50)
+            page.wait_for_timeout(900)
+            opts = page.get_by_role("option")
+            candidate_texts = [opts.nth(i).inner_text() for i in range(opts.count())]
+            if candidate_texts:
+                break
+
+        result = product_matching.decide(product_name, candidate_texts)
+        log.info("Product mapping for %r: %s (score %.2f, candidates: %s)",
+                  product_name, result.outcome, result.best_score, result.candidates_considered)
+
+        if result.outcome == "confident_match":
+            search_box.fill("")
+            search_box.type(result.best_code, delay=50)
+            page.wait_for_timeout(900)
+            opts = page.get_by_role("option")
+            if opts.count() == 1:
+                opts.first.click()
+                page.wait_for_timeout(300)
+                save_btn = page.get_by_role("button", name=re.compile("^Save$", re.I))
+                if save_btn.count() and save_btn.first.is_enabled():
+                    save_btn.first.click()
+                    page.wait_for_timeout(1000)
+                    summary["mapped"].append({
+                        "product_name": product_name, "mapped_to": result.best_candidate,
+                        "code": result.best_code, "score": round(result.best_score, 2),
+                    })
+                    continue
+            # Re-searching by its own code should surface exactly the one candidate we already
+            # scored -- if it doesn't, something's inconsistent enough to not trust blindly.
+            log.warning("Could not cleanly re-select %r by code %r -- treating as ambiguous.",
+                        result.best_candidate, result.best_code)
+            result = product_matching.MatchResult(
+                outcome="ambiguous", product_name=product_name,
+                best_candidate=result.best_candidate, best_code=result.best_code,
+                best_score=result.best_score, candidates_considered=result.candidates_considered,
+            )
+
+        if result.outcome == "confident_new":
+            page.get_by_text(re.compile("^Create new$", re.I)).click()
+            page.wait_for_timeout(500)
+            code_input = page.get_by_label(re.compile("Code", re.I))
+            code_value = code_input.first.input_value() if code_input.count() else None
+            create_btn = page.get_by_role("button", name=re.compile("Create.*Map", re.I))
+            create_btn.first.click()
+            page.wait_for_timeout(1000)
+            summary["created"].append({"product_name": product_name, "code": code_value})
+            continue
+
+        # Ambiguous: leave it alone rather than guess -- cancel the inline editor and move on
+        # (any other rows in this batch still get a chance to auto-resolve).
+        cancel_btn = page.get_by_role("button", name=re.compile("^Cancel$", re.I))
+        if cancel_btn.count():
+            cancel_btn.first.click()
+            page.wait_for_timeout(300)
+        summary["ambiguous"].append({
+            "product_name": product_name, "best_candidate": result.best_candidate,
+            "best_code": result.best_code, "score": round(result.best_score, 2),
+            "candidates_considered": result.candidates_considered,
+        })
+        # Don't retry the same ambiguous row forever -- move past it so other rows still get
+        # a chance, by not letting the loop re-select it (it stays in "Needs review", but the
+        # next iteration will hit it again and reach the same ambiguous verdict; cap this by
+        # tracking names we've already given up on).
+        if len(summary["ambiguous"]) >= _MAX_PRODUCT_REVIEW_ITEMS:
+            break
+        # If the only remaining item(s) are ones already marked ambiguous, stop looping instead
+        # of re-deciding the same row endlessly.
+        remaining = _REVIEW_ITEM_RE.findall(page.locator("body").inner_text())
+        already_ambiguous = {a["product_name"] for a in summary["ambiguous"]}
+        if remaining and all(n.strip() in already_ambiguous for n in remaining):
+            break
+
+    return summary
+
+
 def step_vendsoft_import(ctx: Context) -> None:
     page = ctx.vendsoft_page()
     log = ctx.log
@@ -600,6 +722,21 @@ def step_vendsoft_import(ctx: Context) -> None:
     machines_review = re.search(r"Machines to review\D*(\d+)", page_text)
     products_review = re.search(r"Products to review\D*(\d+)", page_text)
 
+    resolution = None
+    if (
+        machines_review and products_review
+        and int(machines_review.group(1)) == 0
+        and int(products_review.group(1)) > 0
+    ):
+        resolution = _resolve_product_mappings(page, log)
+        try:
+            page_text = page.locator("body").inner_text()
+        except Exception as e:
+            page_text = f"(could not capture page text: {e})"
+        machines_review = re.search(r"Machines to review\D*(\d+)", page_text)
+        products_review = re.search(r"Products to review\D*(\d+)", page_text)
+        import_button = page.get_by_role("button", name=re.compile(r"^IMPORT .*TRANSACTIONS$", re.I))
+
     if (
         machines_review and products_review
         and int(machines_review.group(1)) == 0
@@ -608,6 +745,8 @@ def step_vendsoft_import(ctx: Context) -> None:
     ):
         log.info("VendSoft review screen: everything auto-resolved (0 machines, 0 products "
                  "to review) -- clicking final import confirmation.")
+        if resolution and (resolution["mapped"] or resolution["created"]):
+            log.info("PRODUCT_AUTO_RESOLVED: %s", json.dumps(resolution))
         import_button.first.click()
         _wait_settled(page)
         page.wait_for_timeout(2000)
@@ -627,6 +766,19 @@ def step_vendsoft_import(ctx: Context) -> None:
         stats = _extract_vendsoft_stats(page_text, outcome="already_imported")
         log.info("VENDSOFT_IMPORT_STATS: %s", json.dumps(stats))
         return
+
+    # A product mapping attempt was made above but left something genuinely ambiguous (no
+    # confident existing match, but not obviously a new product either) -- a different, calmer
+    # outcome than a real failure: expected to happen sometimes, not alarming, and everything
+    # else in the batch that *could* be resolved already was (see PRODUCT_AUTO_RESOLVED above,
+    # if anything got auto-mapped/created before hitting the ambiguous item).
+    if resolution and resolution["ambiguous"]:
+        log.error("PRODUCT_MAPPING_NEEDS_REVIEW: %s", json.dumps(resolution))
+        raise StepFailed(
+            f"{len(resolution['ambiguous'])} product(s) need a human judgment call -- no "
+            "confident existing match, but not clearly new either. See the candidates "
+            "considered in the email/log, then resolve in VendSoft and resume."
+        )
 
     log.error("VendSoft did not show a known-good outcome after attaching (neither 'already "
               "imported' nor a fully auto-resolved review screen). Machines/products to review "
