@@ -719,14 +719,23 @@ def step_vendsoft_import(ctx: Context) -> None:
     except Exception as e:
         page_text = f"(could not capture page text: {e})"
 
+    # Scope every text check below to the CURRENT attempt's own panel, cut off before "Import
+    # History" -- confirmed live 2026-09-21 (full page text captured and inspected) that this
+    # heading reliably separates the current result from the history table underneath it, and
+    # that table is full of past attempts, many themselves legitimately labeled "Already
+    # imported". A bare substring search over the *whole* page catches that history text
+    # instead of the current attempt's real state -- this is the root cause behind two
+    # separate false-positive incidents (2026-09-10, 2026-09-21) where "already imported" was
+    # concluded while a real, unclicked import button/pending batch was still sitting there.
+    # A "Ready to import"/"Needs attention" page (still actively being reviewed) doesn't have
+    # an "Import History" section at all, so this is a no-op there.
+    page_text = page_text.split("Import History", 1)[0]
+
     # Check the actionable "ready to import" screen FIRST. This must come before the
-    # "already imported" text check below: VendSoft's page also lists a history of past
-    # import attempts, and past entries there can legitimately be labeled "already imported"
-    # even while the CURRENT attempt still has new transactions ready and an unclicked
-    # import button -- a bare substring search over the whole page matches that history
-    # text and returns early without ever importing anything (confirmed live 2026-09-10:
-    # a batch with 9 ready transactions, 0 machines/products to review, and a visible
-    # "IMPORT 9 TRANSACTIONS" button was wrongly reported as already_imported).
+    # "already imported" text check below, for the same reason as the truncation above --
+    # belt and suspenders (confirmed live 2026-09-10: a batch with 9 ready transactions, 0
+    # machines/products to review, and a visible "IMPORT 9 TRANSACTIONS" button was wrongly
+    # reported as already_imported).
     machines_review = re.search(r"Machines to review\D*(\d+)", page_text)
     products_review = re.search(r"Products to review\D*(\d+)", page_text)
 
@@ -738,7 +747,7 @@ def step_vendsoft_import(ctx: Context) -> None:
     ):
         resolution = _resolve_product_mappings(page, log)
         try:
-            page_text = page.locator("body").inner_text()
+            page_text = page.locator("body").inner_text().split("Import History", 1)[0]
         except Exception as e:
             page_text = f"(could not capture page text: {e})"
         machines_review = re.search(r"Machines to review\D*(\d+)", page_text)
@@ -768,8 +777,12 @@ def step_vendsoft_import(ctx: Context) -> None:
         return
 
     # Only treat "already imported" as a terminal, nothing-to-do state once the actionable
-    # path above has been ruled out -- and only when there's no live import button, as an
-    # extra guard against the same history-text false positive.
+    # path above has been ruled out, and only when there's no live import button -- an extra
+    # guard against the same class of history-text false positive the truncation above already
+    # targets. (A genuine "Already imported" result never shows "Products/Machines to review"
+    # text at all -- confirmed live 2026-09-21 -- so those counts can't be required here the
+    # way the success branch above requires them; this outcome has its own, simpler shape:
+    # a short "Already imported" summary with no button, nothing else.)
     if re.search("already imported", page_text, re.I) and import_button.count() == 0:
         stats = _extract_vendsoft_stats(page_text, outcome="already_imported")
         log.info("VENDSOFT_IMPORT_STATS: %s", json.dumps(stats))
