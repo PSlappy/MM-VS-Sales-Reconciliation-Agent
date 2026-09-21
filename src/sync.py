@@ -692,9 +692,17 @@ def step_vendsoft_import(ctx: Context) -> None:
     # read matched a stray "already imported" label from the attempt-history list below the
     # fold while the current attempt's real result panel was still loading, causing the step
     # to report success without ever clicking the actual import button.
+    #
+    # 60s was originally enough margin, but the rolling 30-day file keeps growing as daily
+    # transaction volume grows (866 rows on 09-10 -> 902 on 09-21), and VendSoft's server-side
+    # processing time grows with it. Confirmed live 2026-09-21: a 902-row file hit the 60s
+    # timeout with the progress bar at ~98% -- the button was seconds away, not stuck, but the
+    # step gave up right before it appeared and hit the exact same false-"already imported"
+    # fallback this wait was originally added to prevent. Matching the CSV download step's own
+    # 5-minute allowance for the same reason (large file, slow server-side processing).
     import_button = page.get_by_role("button", name=re.compile(r"^IMPORT .*TRANSACTIONS$", re.I))
     try:
-        import_button.first.wait_for(state="visible", timeout=60000)
+        import_button.first.wait_for(state="visible", timeout=300000)
     except PlaywrightTimeoutError:
         pass
 
